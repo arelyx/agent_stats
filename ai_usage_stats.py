@@ -11,6 +11,7 @@ This is intentionally format-tolerant: it uses heuristics rather than strict sch
 from __future__ import annotations
 
 import argparse
+import io
 import csv
 import dataclasses
 import datetime as dt
@@ -620,6 +621,7 @@ def main(argv: List[str]) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--student", required=True, help="Student identifier (email/ID). Used only to derive a pseudonym.")
     ap.add_argument("--csv", default="ai_usage_trace.csv", help="Output trace CSV path (time-based events)")
+    ap.add_argument("--summary", default="summary.txt", help="Output summary text path")
     ap.add_argument("--json", help="Optional: Output detailed JSON for debugging")
     ap.add_argument("--filter", help="Optional: Regex pattern to filter by working directory/file path")
     ap.add_argument(
@@ -718,33 +720,39 @@ def main(argv: List[str]) -> int:
         all_prompt_times.extend(s.prompt_response_times)
     avg_prompt_time = sum(all_prompt_times) / len(all_prompt_times) if all_prompt_times else 0.0
 
-    # Print Ruby-style summary
-    print(f"=== Claude Code Trace Analysis ({len(sessions)} files) ===")
+    # Print Ruby-style summary (and save to file)
+    summary_buf = io.StringIO()
+
+    def emit(line: str = "") -> None:
+        print(line)
+        summary_buf.write(line + "\n")
+
+    emit(f"=== Claude Code Trace Analysis ({len(sessions)} files) ===")
     if filter_pattern:
-        print(f"🔍 Filter: {args.filter}")
-    print()
-    print("📊 AGGREGATE STATISTICS:")
-    print(f"  • Total files analyzed: {len(sessions)}")
-    print(f"  • Total tools called: {total_tool_calls}")
+        emit(f"🔍 Filter: {args.filter}")
+    emit()
+    emit("📊 AGGREGATE STATISTICS:")
+    emit(f"  • Total files analyzed: {len(sessions)}")
+    emit(f"  • Total tools called: {total_tool_calls}")
 
     if all_exec_times:
-        print(f"  • Tool use: {avg_tool_time:.3f} sec avg, {total_tool_calls} calls")
+        emit(f"  • Tool use: {avg_tool_time:.3f} sec avg, {total_tool_calls} calls")
 
         # Sort tools by name for consistent output
         for tool_name in sorted(all_tool_stats.keys()):
             tool_stat = all_tool_stats[tool_name]
             avg_time = tool_stat.avg_time()
-            print(f"    + {tool_name} tool: {avg_time:.1f} sec avg, {tool_stat.count} calls")
+            emit(f"    + {tool_name} tool: {avg_time:.1f} sec avg, {tool_stat.count} calls")
     else:
-        print(f"  • Tool use: Unable to calculate (insufficient timing data)")
+        emit(f"  • Tool use: Unable to calculate (insufficient timing data)")
 
-    print(f"  • Total user prompts: {total_prompts}")
+    emit(f"  • Total user prompts: {total_prompts}")
 
     if all_prompt_times:
-        print(f"  • User prompts: {avg_prompt_time:.3f} sec avg, {total_prompts} calls")
+        emit(f"  • User prompts: {avg_prompt_time:.3f} sec avg, {total_prompts} calls")
 
     if all_iterations:
-        print(f"  • Average Claude iterations per prompt: {avg_iterations:.2f}")
+        emit(f"  • Average Claude iterations per prompt: {avg_iterations:.2f}")
 
     # Per-agent breakdown
     agent_stats: Dict[str, Dict[str, Any]] = {}
@@ -779,18 +787,18 @@ def main(argv: List[str]) -> int:
     )
 
     if show_agent_breakdown and agent_stats:
-        print()
-        print("📊 BY CODING AGENT:")
+        emit()
+        emit("📊 BY CODING AGENT:")
         for agent in sorted(agent_stats.keys()):
             stats = agent_stats[agent]
-            print(f"  • {agent}: {stats['sessions']} sessions, {stats['prompts']} prompts, {stats['tool_calls']} tool calls")
+            emit(f"  • {agent}: {stats['sessions']} sessions, {stats['prompts']} prompts, {stats['tool_calls']} tool calls")
 
             # Show top 3 most used tools for this agent
             if stats["tool_stats"]:
                 sorted_tools = sorted(stats["tool_stats"].items(), key=lambda x: x[1].count, reverse=True)[:3]
                 for tool_name, tool_stat in sorted_tools:
                     avg_time = tool_stat.avg_time()
-                    print(f"    + {tool_name}: {avg_time:.1f} sec avg, {tool_stat.count} calls")
+                    emit(f"    + {tool_name}: {avg_time:.1f} sec avg, {tool_stat.count} calls")
 
     # Collect unique working directories
     all_working_dirs = set()
@@ -798,12 +806,17 @@ def main(argv: List[str]) -> int:
         all_working_dirs.update(s.working_dirs)
 
     if all_working_dirs:
-        print()
-        print(f"📂 WORKING DIRECTORIES ({len(all_working_dirs)} unique):")
+        emit()
+        emit(f"📂 WORKING DIRECTORIES ({len(all_working_dirs)} unique):")
         for wd in sorted(all_working_dirs)[:10]:  # Show top 10
-            print(f"  • {wd}")
+            emit(f"  • {wd}")
         if len(all_working_dirs) > 10:
-            print(f"  ... and {len(all_working_dirs) - 10} more")
+            emit(f"  ... and {len(all_working_dirs) - 10} more")
+
+    with open(args.summary, "w", encoding="utf-8") as f:
+        f.write(summary_buf.getvalue())
+    print()
+    print(f"✅ Wrote summary to: {args.summary}")
 
     # Write time-based CSV trace
     all_events: List[TraceEvent] = []
