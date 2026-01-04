@@ -27,3 +27,7 @@ The `--filter` option allows you to focus analysis on specific projects (avoids 
 
 - `--filter "cse247b"` matches sessions where the project contains "cse247b"
 - `--filter "hagent"` matches paths like `.../hagent/core` or `.../hagent/foo/core`
+
+## Agent Notifications
+
+The `hooks/` directory contains configuration files and scripts to set up visual/audio notifications for coding agent activity. See [hooks/README.md](hooks/README.md) for setup instructions on how to configure Claude Code to notify you when it's waiting for input or actively running.
