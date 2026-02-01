@@ -4,7 +4,7 @@ This file provides guidance to coding agents when working with code in this repo
 
 ## Overview
 
-This repository contains `ai_usage_stats.py`, a Python script that collects and analyzes AI tool usage statistics from local log files of Claude Code, Codex CLI, and Gemini CLI. The script uses heuristics to parse various log formats and generates detailed statistics with per-tool breakdowns, execution times, and working directory tracking.
+This repository contains `ai_usage_stats.py`, a Python script that collects and analyzes AI tool usage statistics from local log files of Claude Code, Codex CLI, Gemini CLI, and Cursor. The script uses heuristics to parse various log formats and generates detailed statistics with per-tool breakdowns, execution times, and working directory tracking.
 
 ## Running the Script
 
@@ -34,6 +34,7 @@ The script automatically discovers log files from default locations:
 - **Claude Code**: `~/.claude/projects/**/*.jsonl`
 - **Codex CLI**: `~/.codex/sessions/**/rollout-*.jsonl` (or `$CODEX_HOME`)
 - **Gemini CLI**: `~/.gemini/tmp/**/session-*.json`
+- **Cursor**: `~/.cursor/ai-tracking/ai-code-tracking.db` (SQLite)
 
 Files are classified by path patterns and extensions. The `classify_and_parse()` function (line 274) routes each file to the appropriate parser.
 
@@ -50,6 +51,7 @@ The script uses format-tolerant heuristics rather than strict schemas:
    - `parse_claude_jsonl()`: Detailed parser with timing and directory extraction
    - `parse_codex_jsonl()`: Basic counting parser
    - `parse_gemini_json()`: Basic counting parser with nested structure handling
+   - `parse_cursor_sqlite()`: Parses Cursor's ai-code-tracking.db
 
 ### Data Model
 
@@ -61,14 +63,14 @@ The script uses format-tolerant heuristics rather than strict schemas:
 **`TraceEvent`**: A single time-stamped event for the CSV trace
 - `timestamp`: ISO format timestamp
 - `event_type`: "user_prompt", "assistant_response", "tool_call", or "tool_result"
-- `coding_agent`: Which AI agent was used ("claude_code", "codex_cli", "gemini_cli")
+- `coding_agent`: Which AI agent was used ("claude_code", "codex_cli", "gemini_cli", "cursor")
 - `tool_name`: Name of the tool (for tool events)
 - `execution_time`: Execution time in seconds (for tool_result events)
 - `working_dir`: Working directory extracted from tool parameters
 - `session_id`: Session identifier
 
 **`SessionStats`**: Per-session aggregated metrics
-- `tool`: Which coding agent ("claude_code", "codex_cli", "gemini_cli")
+- `tool`: Which coding agent ("claude_code", "codex_cli", "gemini_cli", "cursor")
 - `session_id`: Unique session identifier
 - `session_cwd`: Session-level working directory (from `cwd`/`workdir` fields)
 - `prompts`: Count of user messages
@@ -142,7 +144,7 @@ The script generates:
 2. **Time-based CSV trace** (`ai_usage_trace.csv`): Chronological event log with columns:
    - timestamp
    - event_type
-   - coding_agent (claude_code, codex_cli, gemini_cli)
+   - coding_agent (claude_code, codex_cli, gemini_cli, cursor)
    - tool_name
    - execution_time
    - working_dir

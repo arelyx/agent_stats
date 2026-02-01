@@ -4,6 +4,7 @@ Collect prompt / tool-call statistics from local logs of:
 - Claude Code (jsonl): ~/.claude/projects/**.jsonl
 - Codex CLI (jsonl):   ~/.codex/sessions/**/rollout-*.jsonl (or CODEX_HOME)
 - Gemini CLI (json):   ~/.gemini/tmp/**/session-*.json
+- Cursor (sqlite):     ~/.cursor/ai-tracking/ai-code-tracking.db
 
 This is intentionally format-tolerant: it uses heuristics rather than strict schemas.
 """
@@ -11,15 +12,16 @@ This is intentionally format-tolerant: it uses heuristics rather than strict sch
 from __future__ import annotations
 
 import argparse
-import io
 import csv
 import dataclasses
 import datetime as dt
 import glob
 import hashlib
+import io
 import json
 import os
 import re
+import sqlite3
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -562,6 +564,80 @@ def parse_gemini_json(path: Path) -> SessionStats:
     return stats
 
 
+def parse_cursor_sqlite(path: Path) -> SessionStats:
+    """
+    Parse Cursor's ai-code-tracking.db (SQLite).
+    Tables: ai_code_hashes (code generation events), conversation_summaries.
+    No hooks required - uses Cursor's built-in tracking.
+    """
+    stats = SessionStats(
+        tool="cursor",
+        session_id="cursor_db",
+        file=str(path),
+        mtime_iso=_iso_from_mtime(path),
+    )
+
+    try:
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+    except sqlite3.Error:
+        return stats
+
+    try:
+        # conversation_summaries: 1 row per conversation (prompts)
+        cur.execute("SELECT conversationId FROM conversation_summaries")
+        convos = {row["conversationId"] for row in cur.fetchall()}
+        stats.prompts = len(convos)
+        stats.assistant_msgs = len(convos)
+
+        # ai_code_hashes: code generation events (file edits / Write tool)
+        cur.execute(
+            "SELECT conversationId, fileName, timestamp, model, createdAt FROM ai_code_hashes"
+        )
+        hash_convos: set = set()
+        for row in cur.fetchall():
+            hash_convos.add(row["conversationId"])
+            stats.tool_calls += 1
+            tool_name = "Write"
+            if tool_name not in stats.tool_stats:
+                stats.tool_stats[tool_name] = ToolStats()
+            stats.tool_stats[tool_name].count += 1
+
+            working_dir: Optional[str] = None
+            if row["fileName"]:
+                p = Path(row["fileName"])
+                if p.parent != Path("."):
+                    working_dir = str(p.parent)
+                    stats.working_dirs.append(working_dir)
+
+            ts = row["timestamp"] or row["createdAt"]
+            if ts:
+                try:
+                    ts_dt = dt.datetime.fromtimestamp(ts / 1000.0)
+                except (ValueError, OSError, TypeError):
+                    ts_dt = dt.datetime.fromtimestamp(ts)
+                iso = ts_dt.isoformat(timespec="seconds")
+                stats.trace_events.append(TraceEvent(
+                    timestamp=iso,
+                    event_type="tool_result",
+                    coding_agent=stats.tool,
+                    tool_name=tool_name,
+                    working_dir=working_dir,
+                    session_id=row["conversationId"],
+                ))
+
+        if stats.prompts == 0 and hash_convos:
+            stats.prompts = len(hash_convos)
+            stats.assistant_msgs = len(hash_convos)
+
+        conn.close()
+    except sqlite3.Error:
+        pass
+
+    return stats
+
+
 # -----------------------------
 # Discovery
 # -----------------------------
@@ -573,6 +649,8 @@ def discover_default_paths() -> List[Tuple[str, List[Path]]]:
     codex_home = os.environ.get("CODEX_HOME", os.path.join(home, ".codex"))
     codex_glob = os.path.join(codex_home, "sessions", "**", "rollout-*.jsonl")
     gemini_glob = os.path.join(home, ".gemini", "tmp", "**", "session-*.json")
+    cursor_db = Path(home, ".cursor", "ai-tracking", "ai-code-tracking.db")
+    cursor_files: List[Path] = [cursor_db] if cursor_db.exists() else []
 
     claude = [Path(p) for p in glob.glob(claude_glob, recursive=True)]
     codex = [Path(p) for p in glob.glob(codex_glob, recursive=True)]
@@ -582,6 +660,7 @@ def discover_default_paths() -> List[Tuple[str, List[Path]]]:
         ("claude_code", claude),
         ("codex_cli", codex),
         ("gemini_cli", gemini),
+        ("cursor", cursor_files),
     ]
 
 
@@ -594,11 +673,16 @@ def discover_from_roots(roots: List[str]) -> List[Path]:
 
 def classify_and_parse(path: Path) -> Optional[SessionStats]:
     p = str(path)
-    if p.endswith(".jsonl") and ("/.claude/projects/" in p.replace("\\", "/") or "\\.claude\\projects\\" in p):
+    pnorm = p.replace("\\", "/")
+
+    if path.name == "ai-code-tracking.db" and "/.cursor/ai-tracking/" in pnorm:
+        return parse_cursor_sqlite(path)
+
+    if p.endswith(".jsonl") and ("/.claude/projects/" in pnorm or "\\.claude\\projects\\" in p):
         return parse_claude_jsonl(path)
-    if p.endswith(".jsonl") and ("/.codex/" in p.replace("\\", "/") or "\\.codex\\" in p) and "rollout-" in path.name:
+    if p.endswith(".jsonl") and ("/.codex/" in pnorm or "\\.codex\\" in p) and "rollout-" in path.name:
         return parse_codex_jsonl(path)
-    if p.endswith(".json") and ("/.gemini/tmp/" in p.replace("\\", "/") or "\\.gemini\\tmp\\" in p) and path.name.startswith("session-"):
+    if p.endswith(".json") and ("/.gemini/tmp/" in pnorm or "\\.gemini\\tmp\\" in p) and path.name.startswith("session-"):
         return parse_gemini_json(path)
 
     # Fallback by extension
@@ -681,8 +765,30 @@ def main(argv: List[str]) -> int:
             elif any(filter_pattern.search(wd) for wd in s.working_dirs if wd):
                 session_matches = True
 
-            # If session matches, include the ENTIRE session with all its stats
             if session_matches:
+                # Cursor SQLite aggregates all projects into one session.
+                # Filter to event-level so we only include matching working_dirs.
+                if s.tool == "cursor" and s.session_id == "cursor_db":
+                    matching_events = [
+                        e for e in s.trace_events
+                        if e.working_dir and filter_pattern.search(e.working_dir)
+                    ]
+                    if not matching_events:
+                        continue
+                    # Rebuild session with filtered events only
+                    s.trace_events = matching_events
+                    s.tool_calls = len(matching_events)
+                    s.working_dirs = list({e.working_dir for e in matching_events if e.working_dir})
+                    s.prompts = len({e.session_id for e in matching_events if e.session_id})
+                    s.assistant_msgs = s.prompts
+                    s.tool_stats = {}
+                    for e in matching_events:
+                        if e.tool_name:
+                            if e.tool_name not in s.tool_stats:
+                                s.tool_stats[e.tool_name] = ToolStats()
+                            s.tool_stats[e.tool_name].count += 1
+                            if e.execution_time is not None:
+                                s.tool_stats[e.tool_name].execution_times.append(e.execution_time)
                 filtered_sessions.append(s)
 
         sessions = filtered_sessions

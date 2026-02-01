@@ -34,6 +34,7 @@ The script automatically discovers log files from default locations:
 - **Claude Code**: `~/.claude/projects/**/*.jsonl`
 - **Codex CLI**: `~/.codex/sessions/**/rollout-*.jsonl` (or `$CODEX_HOME`)
 - **Gemini CLI**: `~/.gemini/tmp/**/session-*.json`
+- **Cursor**: `~/.cursor/ai-tracking/ai-code-tracking.db` (SQLite)
 
 Files are classified by path patterns and extensions. The `classify_and_parse()` function (line 274) routes each file to the appropriate parser.
 
@@ -47,9 +48,10 @@ The script uses format-tolerant heuristics rather than strict schemas:
    - Execution times (by tracking tool_use_id from call to result)
    - Working directories (from file_path, path, directory parameters)
 3. **Format-Specific Parsers**:
-   - `parse_claude_jsonl()`: Detailed parser with timing and directory extraction
-   - `parse_codex_jsonl()`: Basic counting parser
-   - `parse_gemini_json()`: Basic counting parser with nested structure handling
+ - `parse_claude_jsonl()`: Detailed parser with timing and directory extraction
+ - `parse_codex_jsonl()`: Basic counting parser
+ - `parse_gemini_json()`: Basic counting parser with nested structure handling
+ - `parse_cursor_sqlite()`: Parses Cursor's ai-code-tracking.db
 
 ### Data Model
 
@@ -61,14 +63,14 @@ The script uses format-tolerant heuristics rather than strict schemas:
 **`TraceEvent`**: A single time-stamped event for the CSV trace
 - `timestamp`: ISO format timestamp
 - `event_type`: "user_prompt", "assistant_response", "tool_call", or "tool_result"
-- `coding_agent`: Which AI agent was used ("claude_code", "codex_cli", "gemini_cli")
+- `coding_agent`: Which AI agent was used ("claude_code", "codex_cli", "gemini_cli", "cursor")
 - `tool_name`: Name of the tool (for tool events)
 - `execution_time`: Execution time in seconds (for tool_result events)
 - `working_dir`: Working directory extracted from tool parameters
 - `session_id`: Session identifier
 
 **`SessionStats`**: Per-session aggregated metrics
-- `tool`: Which coding agent ("claude_code", "codex_cli", "gemini_cli")
+- `tool`: Which coding agent ("claude_code", "codex_cli", "gemini_cli", "cursor")
 - `session_id`: Unique session identifier
 - `session_cwd`: Session-level working directory (from `cwd`/`workdir` fields)
 - `prompts`: Count of user messages
@@ -97,7 +99,9 @@ A session is included if **any** of these match the filter:
 When a session matches:
 - The **entire session** is included with all its statistics
 - All prompts, assistant messages, and tool calls from that session are counted
-- Works across all coding agents (Claude Code, Codex, Gemini)
+- Works across all coding agents (Claude Code, Codex, Gemini, Cursor)
+
+**Cursor exception**: Cursor's SQLite database aggregates all projects into one session. When a filter matches, the script applies **event-level** filtering: only trace events whose `working_dir` matches the filter are included. This ensures the summary and CSV contain only data for the specified project.
 
 **Example**: With `--filter "hagent"`:
 - Claude Code session working on `/Users/you/projs/hagent` → included
